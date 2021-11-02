@@ -47,6 +47,14 @@ var reSourceMap = /^data:application\/json[^,]+base64,/;
 var retrieveFileHandlers = [];
 var retrieveMapHandlers = [];
 
+/** Mappings for webpack://<package>
+ * 
+ * undefined - skipped
+ * string - used for any webpack path
+ * package -> replacement - paths for provided packages
+ */
+var webpackPathMapping;
+
 function isInBrowser() {
   if (environment === "browser")
     return true;
@@ -132,6 +140,17 @@ retrieveFileHandlers.push(function(path) {
 // Support URLs relative to a directory, but be careful about a protocol prefix
 // in case we are in the browser (i.e. directories may start with "http://" or "file:///")
 function supportRelativeURL(file, url) {
+  if (!!webpackPathMapping) {
+    const webpackMatch = /^webpack\:\/\/([^\/]+)(.*)/g.exec(url);
+    if (webpackMatch) {
+      if (typeof webpackPathMapping === 'string') {
+        return webpackPathMapping + webpackMatch[2];
+      } else if (webpackPathMapping[webpackMatch[1]]) {
+        return webpackPathMapping[webpackMatch[1]] + webpackMatch[2];
+      }
+    }
+  }
+
   if (!file) return url;
   var dir = path.dirname(file);
   var match = /^\w+:\/\/[^\/]*/.exec(dir);
@@ -535,6 +554,10 @@ exports.install = function(options) {
     }
   }
 
+  if (options.webpackPathMapping) {
+    webpackPathMapping = options.webpackPathMapping;
+  }
+
   // Allow sources to be found by methods other than reading the files
   // directly from disk.
   if (options.retrieveFile) {
@@ -623,3 +646,46 @@ exports.resetRetrieveHandlers = function() {
   retrieveSourceMap = handlerExec(retrieveMapHandlers);
   retrieveFile = handlerExec(retrieveFileHandlers);
 }
+
+
+// Webpack
+const Compilation = {
+  PROCESS_ASSETS_STAGE_ADDITIONS: -100, //found in webpack/lib/Compilation.js - I don't want to include all of webpack just to get this
+}
+
+function WebpackPlugin(options) {
+  this.pluginName = 'SourceMapSupportPlugin'
+  this.options = options || {};
+}
+
+WebpackPlugin.prototype.apply = function(compiler) {
+  const { ConcatSource } = require('webpack-sources'); //Included here to avoid being pulled in when WebpackPlugin not used
+
+  compiler.hooks.compilation.tap(this.pluginName, compilation => {
+    compilation.hooks.processAssets.tap(
+      {
+        name: this.pluginName,
+        stage: -100, //TODO im not sure i want to import webpack for this all Compilation.PROCESS_ASSETS_STAGE_ADDITIONS
+      },
+      () => {
+        for (const chunk of compilation.chunks) {
+          for (const file of chunk.files) {
+            const data = {
+              chunk,
+              filename: file
+            };
+
+            const code = 'require("source-map-support").install(' + JSON.stringify(this.options) + ');';
+
+            compilation.updateAsset(
+              file,
+              old => new ConcatSource(compilation.getPath(code, data), "\n", old)
+            );
+          }
+        }
+      }
+    );
+  });
+};
+
+exports.SourceMapSupportPlugin = WebpackPlugin;
